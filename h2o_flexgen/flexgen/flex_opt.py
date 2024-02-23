@@ -10,6 +10,7 @@ import pickle
 import time
 from typing import Union, List, Optional
 import psutil
+import pdb
 
 import numpy as np
 from tqdm import tqdm
@@ -365,7 +366,7 @@ class SelfAttention:
             else:
                 path = 0
             dst = self.attention_compute
-
+        # The position is the minimum of the prompt length and the max saved cache length.
         pos = min(self.hh_k * 2 - 1, self.task.prompt_len) + 1
         if path == 0:  # Direct copy
             # shape: (s, b * n_head, head_dim)
@@ -424,6 +425,7 @@ class SelfAttention:
         else:
             raise ValueError(f"Invalid path: {path}")
 
+    # AHMED: This is the function that stores the cache in self attention.
     def store_cache(self, cache_home, cache_write_buf, i):
         # shape: (s, b * n_head, head_dim)
         k_home, v_home, acc = cache_home.val
@@ -438,6 +440,7 @@ class SelfAttention:
 
         else:  # decoding
             if self.policy.hh_all:
+                # This is the part where we replace the oldest token in the recent tokens.
                 oldest = ((i - 1) % (self.hh_k - 1)) - (self.hh_k - 1)
                 cache_replace(k_home, kick_ind, k_new, self.hh_k, oldest)
                 cache_replace(v_home, kick_ind, v_new, self.hh_k, oldest)
@@ -498,6 +501,7 @@ class SelfAttention:
             if self.policy.hh_all is not None:
                 cnt = min(self.hh_k * 2 - 1, self.task.prompt_len + i)
                 mask = mask.device.slice_attention_mask(mask, cnt + 1)
+            # AHMED: This is the line where the attention along with the KV Cache changes happens.
             h, new_k_cache, new_v_cache, acc, kick_ind = self.compute.mha_gen(h, mask, w_q,
                 b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head,
                 k_cache, v_cache, acc, donate, self.policy.attn_sparsity,

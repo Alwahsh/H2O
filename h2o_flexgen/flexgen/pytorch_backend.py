@@ -8,6 +8,7 @@ import shutil
 import time
 import threading
 from typing import Optional, Union, Tuple
+import pdb
 
 # import cupy as cp
 # from cupyx import jit
@@ -536,7 +537,7 @@ class TorchDevice:
 
         return TorchTensor.create_from_torch(value, self), k_new, v_new, acc, kick_ind
 
-
+    # AHMED: This is the function that determines which tokens to remove from the cache.
     def _get_light_hitter(self, acc):
         # return torch.zeros(attn_weights.shape[0])
         if acc.shape[0] > 0:
@@ -932,6 +933,16 @@ class TorchLink:
 
 
 def cache_replace(dst: TorchTensor, dst_indices, src: torch.Tensor, hh_k, oldest):
+    """
+        Replaces the value in the `dst_indices` by the value in `oldest` and then places
+        `src` in place of `oldest`.
+    """
+    # dst is the final cache.
+    # dst_indices is the indices of the tokens to be replaced.
+    # src is the new token to be added to the cache.
+    # hh_k is the number of heavy hitters.
+    # oldest is the index of the oldest token in the cache.
+
     # mask = torch.ones(dst.shape[0], dst.shape[1], dtype=torch.bool).to(dst.data.device)
     # indices = dst_indices.unsqueeze(0).to(dst.data.device)
     # mask.scatter_(0, indices, torch.zeros_like(indices, dtype=torch.bool))
@@ -942,7 +953,7 @@ def cache_replace(dst: TorchTensor, dst_indices, src: torch.Tensor, hh_k, oldest
     # return
 
     # dst: (s, b * n_head, head_dim)
-    # dst_indices: (h)
+    # dst_indices: (h) = b * n_head
     # src: (1, b * n_head, head_dim)
     if abs(oldest) >= min(dst.shape[0], hh_k * 2): return
 
@@ -966,9 +977,14 @@ def cache_replace(dst: TorchTensor, dst_indices, src: torch.Tensor, hh_k, oldest
     #return
 
     # least_recent[0, :, :] = dst.data[oldest][:, :]
+
+    # Get the least_recent values to put them instead of the least heavy hitter.
     least_recent = torch.tensor(dst.data[oldest]).unsqueeze(0).to(dst.data.device)
+    # Get the indices of the tokens to be replaced.
     indices = dst_indices.view(-1, 1).expand(-1, dst.shape[2]).unsqueeze(0).to(dst.data.device)
+    # Replace the least heavy hitter with the least recent tokens.
     dst.data.scatter_(0, indices, least_recent)
+    # Add the new token to the cache in place of the oldest that was just replaced.
     dst.data[oldest] = src.data.squeeze()
 
 
@@ -987,11 +1003,17 @@ def acc_replace(dst, dst_indices, src, hh_k, oldest):
     # return
  
     if abs(oldest) >= min(dst.shape[0], hh_k * 2): return
+    # Replace the old acc with the new acc.
     dst.data = src.data
+    # Adjust the index of the oldest token.
     oldest = hh_k * 2 - 1 + oldest
+    # Get the index of the least recent token.
     least_recent = torch.tensor(src.data[oldest]).unsqueeze(0).to(dst.data.device)
+    # Get the indices of the tokens to be replaced.
     indices = dst_indices.unsqueeze(0).to(dst.data.device)
+    # Replace the least heavy hitter with the least recent token.
     dst.data.scatter_(0, indices, least_recent)
+    # Add the new token to the cache in place of the oldest that was just replaced.
     dst.data[oldest] = src.data[-1]
 
 
