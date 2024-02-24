@@ -320,7 +320,7 @@ class TorchDevice:
         return k_cache, v_cache, acc
 
     def mha(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v,
-            w_out, b_out, w_ln, b_ln, n_head, donate, compress_cache, comp_config, hh_k=None, hh_all=None):
+            w_out, b_out, w_ln, b_ln, n_head, donate, compress_cache, comp_config, hh_k=None, hh_all=None, attn_sink=False):
         """Multi-head attention (prefill phase)."""
         # decompress weights
         if w_q.device.device_type == DeviceType.COMPRESSED:
@@ -382,8 +382,10 @@ class TorchDevice:
         k = k.permute(2, 0, 1)
         v = v.permute(1, 0, 2)
 
+        if attn_sink:
+            k, v, acc = self._attn_sink_pruning(k, v, hh_k)
         # select the heavy hitters and recent tokens
-        if hh_k is not None:
+        elif hh_k is not None:
             k, v, acc = self._heavy_hitter_pruning(k, v, attn_weights, hh_k)
 
         if compress_cache:
@@ -392,14 +394,15 @@ class TorchDevice:
         else:
             k = TorchTensor.create_from_torch(k, self)
             v = TorchTensor.create_from_torch(v, self)
-            acc = TorchTensor.create_from_torch(acc, self)
+            if acc is not None:
+                acc = TorchTensor.create_from_torch(acc, self)
 
         return TorchTensor.create_from_torch(value, self), k, v, acc
 
     def mha_gen(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v,
                 w_out, b_out, w_ln, b_ln, n_head, k_cache, v_cache, acc, donate,
                 attn_sparsity, compress_cache, comp_config,
-                hh_k=None, hh_all=False):
+                hh_k=None, hh_all=False, attn_sink=False):
         """Multi-head attention (decoding phase)."""
         # decompress weights
         if w_q.device.device_type == DeviceType.COMPRESSED:
@@ -519,20 +522,23 @@ class TorchDevice:
 
         # get the least heavy hitter (except recent tokens)
         kick_ind = None
-        if hh_all:
-            # k shape: (b * n_head, head_dim, s)
-            # v shape: (b * n_head, s, head_dim)
-            # attn_weights shape: (b * n_head, 1, s)
-            # print(attn_weights.shape)
-            attn_weights = attn_weights.squeeze(1).transpose(0, 1)
-            # (s, b * n_head)
-            acc.data = acc.data.cuda()
-            acc.data[-1] = 0
-            acc.data = acc.data + attn_weights
-            # print("acc.data", acc.data.shape, acc.data[:, -4])
-            kick_ind = self._get_light_hitter(acc.data[:src_s - hh_k, :])
-            if not k.is_cuda:
-                acc.data = acc.data.float().cpu()
+        if attn_sink:
+            acc = None
+        else:
+            if hh_all:
+                # k shape: (b * n_head, head_dim, s)
+                # v shape: (b * n_head, s, head_dim)
+                # attn_weights shape: (b * n_head, 1, s)
+                # print(attn_weights.shape)
+                attn_weights = attn_weights.squeeze(1).transpose(0, 1)
+                # (s, b * n_head)
+                acc.data = acc.data.cuda()
+                acc.data[-1] = 0
+                acc.data = acc.data + attn_weights
+                # print("acc.data", acc.data.shape, acc.data[:, -4])
+                kick_ind = self._get_light_hitter(acc.data[:src_s - hh_k, :])
+                if not k.is_cuda:
+                    acc.data = acc.data.float().cpu()
             # kick_ind = self._get_light_hitter(acc.data[:src_s - hh_k + 1, :])
 
         return TorchTensor.create_from_torch(value, self), k_new, v_new, acc, kick_ind
@@ -550,7 +556,18 @@ class TorchDevice:
             return kick_ind
         return None
 
+    def _attn_sink_pruning(self, k, v, hh_k):
+        """Keeps the first hh_k tokens and the last hh_k tokens."""
+        # k, v: (s, b * n_head, head_dim)
+        # We need to transform them to:
+        # (hh_k * 2, b * n_head, head_dim)
+        
+        k = torch.cat([k[:hh_k-1], k[-hh_k + 1:]], dim=0)
+        v = torch.cat([v[:hh_k-1], v[-hh_k + 1:]], dim=0)
+        # k = torch.cat([v[:hh_k-1], v[-hh_k + 1:]], dim=0)
+        return k, v, None
 
+    # AHMED: This is the function that choses the heavy hitters in prefill.
     def _heavy_hitter_pruning(self, k, v, attn_weights, hh_k):
         # k, v: (s, b * n_head, head_dim)
         # attn_weights: (b * n_head, s, s)
@@ -980,10 +997,11 @@ def cache_replace(dst: TorchTensor, dst_indices, src: torch.Tensor, hh_k, oldest
 
     # Get the least_recent values to put them instead of the least heavy hitter.
     least_recent = torch.tensor(dst.data[oldest]).unsqueeze(0).to(dst.data.device)
-    # Get the indices of the tokens to be replaced.
-    indices = dst_indices.view(-1, 1).expand(-1, dst.shape[2]).unsqueeze(0).to(dst.data.device)
-    # Replace the least heavy hitter with the least recent tokens.
-    dst.data.scatter_(0, indices, least_recent)
+    if dst_indices is not None:
+        # Get the indices of the tokens to be replaced.
+        indices = dst_indices.view(-1, 1).expand(-1, dst.shape[2]).unsqueeze(0).to(dst.data.device)
+        # Replace the least heavy hitter with the least recent tokens.
+        dst.data.scatter_(0, indices, least_recent)
     # Add the new token to the cache in place of the oldest that was just replaced.
     dst.data[oldest] = src.data.squeeze()
 

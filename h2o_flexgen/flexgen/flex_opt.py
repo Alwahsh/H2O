@@ -74,6 +74,9 @@ class Policy:
     hh_all: bool = False
     hh_long_seq: bool = False
 
+    # Attention Sink
+    attn_sink: bool = False
+
     @property
     def w_disk_percent(self):
         return 100 - self.w_gpu_percent - self.w_cpu_percent
@@ -444,7 +447,8 @@ class SelfAttention:
                 oldest = ((i - 1) % (self.hh_k - 1)) - (self.hh_k - 1)
                 cache_replace(k_home, kick_ind, k_new, self.hh_k, oldest)
                 cache_replace(v_home, kick_ind, v_new, self.hh_k, oldest)
-                acc_replace(acc, kick_ind, acc_new, self.hh_k, oldest)
+                if acc_new is not None and acc is not None:
+                    acc_replace(acc, kick_ind, acc_new, self.hh_k, oldest)
                 return
 
             if self.hh_k is None:
@@ -456,7 +460,7 @@ class SelfAttention:
 
         general_copy(k_home, indices, k_new, None)
         general_copy(v_home, indices, v_new, None)
-        if self.policy.hh_all:
+        if self.policy.hh_all and acc is not None and acc_new is not None:
             general_copy(acc, indices, acc_new, None)
 
     def input_act_shape_and_dtype(self, batch_size, seq_len):
@@ -485,7 +489,7 @@ class SelfAttention:
             h, new_k_cache, new_v_cache, acc = self.compute.mha(h, mask, w_q, b_q,
                 w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head, donate,
                 self.policy.compress_cache, self.policy.comp_cache_config,
-                self.hh_k, self.policy.hh_all)
+                self.hh_k, self.policy.hh_all, self.policy.attn_sink)
             # print(new_k_cache.shape)
             # print(new_k_cache.data[:, :2, :2])
             cache_write_buf.store((new_k_cache, new_v_cache, acc, None))
@@ -506,7 +510,7 @@ class SelfAttention:
                 b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head,
                 k_cache, v_cache, acc, donate, self.policy.attn_sparsity,
                 self.policy.compress_cache, self.policy.comp_cache_config,
-                self.hh_k, self.policy.hh_all)
+                self.hh_k, self.policy.hh_all, self.policy.attn_sink)
             # if self.layer_id == 10:
             #     print(h.data)
             cache_write_buf.store((new_k_cache, new_v_cache, acc, kick_ind))
@@ -1261,6 +1265,8 @@ def get_test_inputs(prompt_len, num_prompts, tokenizer):
     prompts = ["As I sit here on my porch, sipping my coffee and watching the world go by, I can not help but feel a sense of wonder at the sheer complexity of everything around us. From the smallest particle to the grandest galaxy, the universe is a tapestry of infinite detail and beauty. And yet, for all its complexity, there is a simplicity to it all that is truly awe-inspiring. Everything is connected, in ways that we can not even begin to fathom. Every action has a reaction, every cause has an effect. And yet, even with all the knowledge that we have amassed, there is still so much that we do not understand. There are mysteries that have eluded us for centuries, and may continue to do so for centuries to come. But that does not stop us from trying to unravel them. It does not stop us from exploring the depths of our own consciousness, or the vast expanse of the cosmos. It does not stop us from seeking answers to the biggest questions of all. Who are we? Why are we here? What is the meaning of life? These are questions that have plagued us since the dawn of time, and yet we continue to search for answers. Perhaps it is in the search itself that we find meaning. Perhaps it is in the journey, rather than the destination, that we discover the true nature of our existence. And so, as I sit here on my porch, watching the world go by, I am content to simply marvel at the beauty and complexity of it all, and to embrace the mystery that lies at the heart of our being."]
     input_ids = tokenizer(prompts, padding="max_length",
                           max_length=prompt_len, add_special_tokens=False).input_ids
+    # Seems max_length is not working.
+    input_ids = [ids[:prompt_len] for ids in input_ids]
     # input_ids = tokenizer(prompts, add_special_tokens=False).input_ids
     return (input_ids[0],) * num_prompts
 
@@ -1272,7 +1278,6 @@ def run_flexgen(args):
         tokenizer = AutoTokenizer.from_pretrained("facebook/opt-30b", padding_side="left", use_fast=True)
     num_prompts = args.num_gpu_batches * args.gpu_batch_size
     prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
-
     # Task and policy
     warmup_inputs = get_test_inputs(prompt_len, num_prompts, tokenizer)
     inputs = get_test_inputs(prompt_len, num_prompts, tokenizer)
@@ -1298,7 +1303,8 @@ def run_flexgen(args):
                                       group_dim=2, symmetric=False),
                     hh_ratio=args.hh_ratio,
                     hh_all=args.hh_all,
-                    hh_long_seq=args.hh_long_seq)
+                    hh_long_seq=args.hh_long_seq,
+                    attn_sink=args.attn_sink)
     assert not (args.compress_cache and args.attn_sparsity < 1.0), "Not implemented"
 
     opt_config = get_opt_config(args.model)
@@ -1407,6 +1413,7 @@ def add_parser_arguments(parser):
                         help="ratio of the prompt seq length")
     parser.add_argument("--hh-all", type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument("--hh-long-seq", type=str2bool, nargs='?', const=True, default=False)
+    parser.add_argument("--attn_sink", type=str2bool, nargs='?', const=True, default=False)
 
     parser.add_argument("--log-file", type=str, default="auto")
     parser.add_argument("--no-log", action="store_true")
