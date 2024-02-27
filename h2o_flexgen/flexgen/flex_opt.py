@@ -11,6 +11,7 @@ import time
 from typing import Union, List, Optional
 import psutil
 import pdb
+import hashlib
 
 import numpy as np
 from tqdm import tqdm
@@ -428,6 +429,10 @@ class SelfAttention:
         else:
             raise ValueError(f"Invalid path: {path}")
 
+    def hash_tensor(self, tensor):
+        tensor_bytes = tensor.cpu().numpy().tobytes()
+        return hashlib.sha256(tensor_bytes).hexdigest()
+
     # AHMED: This is the function that stores the cache in self attention.
     def store_cache(self, cache_home, cache_write_buf, i):
         # shape: (s, b * n_head, head_dim)
@@ -443,6 +448,11 @@ class SelfAttention:
 
         else:  # decoding
             if self.policy.hh_all:
+                # if self.layer_id == 10:
+                #     print("k initial: ", self.hash_tensor(k_home.data[:self.hh_k,:,:]))
+                #     print("v initial: ", self.hash_tensor(v_home.data[:self.hh_k,:,:]))
+                #     print("k final: ", self.hash_tensor(k_home.data[self.hh_k:,:,:]))
+                #     print("v final: ", self.hash_tensor(v_home.data[self.hh_k:,:,:]))
                 # This is the part where we replace the oldest token in the recent tokens.
                 oldest = ((i - 1) % (self.hh_k - 1)) - (self.hh_k - 1)
                 cache_replace(k_home, kick_ind, k_new, self.hh_k, oldest)
@@ -457,9 +467,9 @@ class SelfAttention:
                 pos = min(self.hh_k * 2 - 1, self.task.prompt_len) + i
             indices = (slice(pos - k_new.shape[0], pos),
                        slice(0, k_new.shape[1]))
-
         general_copy(k_home, indices, k_new, None)
         general_copy(v_home, indices, v_new, None)
+        # print(k_home.data.shape)
         if self.policy.hh_all and acc is not None and acc_new is not None:
             general_copy(acc, indices, acc_new, None)
 
@@ -514,7 +524,6 @@ class SelfAttention:
             # if self.layer_id == 10:
             #     print(h.data)
             cache_write_buf.store((new_k_cache, new_v_cache, acc, kick_ind))
-
         hidden.val = h
 
 
@@ -1048,8 +1057,9 @@ class OptLM:
                     timers("decoding_gpu_batch").stop()
                     pbar.update(1)
                     batch_ct += 1
-                if batch_ct >= execute_num_batches: break
-            if batch_ct >= execute_num_batches: break
+            # AHMED: During debugging, they break the loop after a few forward passes. I disabled that part.
+                # if batch_ct >= execute_num_batches: break
+            # if batch_ct >= execute_num_batches: break
             if i == 0: timers("prefill_total").stop(self.sync)
 
         # Convert "decoding_gpu_batch" timer to "generate" timer
@@ -1261,8 +1271,10 @@ def get_filename(args):
 
 def get_test_inputs(prompt_len, num_prompts, tokenizer):
     # prompts = ["Paris is the capital city of"]
-    prompts = ["Artificial Intelligence (AI) refers to the development of computer systems or machines that can perform tasks that typically require human intelligence. These tasks include problem-solving, learning, understanding natural language, recognizing patterns, perception, and decision-making. AI systems are designed to process vast amounts of data and draw conclusions or make decisions based on that data. There are two main categories of AI: Narrow AI and General AI. Narrow AI, also known as Weak AI, is designed for "]
-    prompts = ["As I sit here on my porch, sipping my coffee and watching the world go by, I can not help but feel a sense of wonder at the sheer complexity of everything around us. From the smallest particle to the grandest galaxy, the universe is a tapestry of infinite detail and beauty. And yet, for all its complexity, there is a simplicity to it all that is truly awe-inspiring. Everything is connected, in ways that we can not even begin to fathom. Every action has a reaction, every cause has an effect. And yet, even with all the knowledge that we have amassed, there is still so much that we do not understand. There are mysteries that have eluded us for centuries, and may continue to do so for centuries to come. But that does not stop us from trying to unravel them. It does not stop us from exploring the depths of our own consciousness, or the vast expanse of the cosmos. It does not stop us from seeking answers to the biggest questions of all. Who are we? Why are we here? What is the meaning of life? These are questions that have plagued us since the dawn of time, and yet we continue to search for answers. Perhaps it is in the search itself that we find meaning. Perhaps it is in the journey, rather than the destination, that we discover the true nature of our existence. And so, as I sit here on my porch, watching the world go by, I am content to simply marvel at the beauty and complexity of it all, and to embrace the mystery that lies at the heart of our being."]
+    # prompts = ["Artificial Intelligence (AI) refers to the development of computer systems or machines that can perform tasks that typically require human intelligence. These tasks include problem-solving, learning, understanding natural language, recognizing patterns, perception, and decision-making. AI systems are designed to process vast amounts of data and draw conclusions or make decisions based on that data. There are two main categories of AI: Narrow AI and General AI. Narrow AI, also known as Weak AI, is designed for "]
+    prompts = ["I don't repeat sentences. As I sit here on my porch, sipping my coffee and watching the world go by, I can not help but feel a sense of wonder at the sheer complexity of everything around us. From the smallest particle to the grandest galaxy, the universe is a tapestry of infinite detail and beauty. And yet, for all its complexity, there is a simplicity to it all that is truly awe-inspiring. Everything is connected, in ways that we can not even begin to fathom. Every action has a reaction, every cause has an effect. And yet, even with all the knowledge that we have amassed, there is still so much that we do not understand. There are mysteries that have eluded us for centuries, and may continue to do so for centuries to come. But that does not stop us from trying to unravel them. It does not stop us from exploring the depths of our own consciousness, or the vast expanse of the cosmos. It does not stop us from seeking answers to the biggest questions of all. Who are we? Why are we here? What is the meaning of life? These are questions that have plagued us since the dawn of time, and yet we continue to search for answers. Perhaps it is in the search itself that we find meaning. Perhaps it is in the journey, rather than the destination, that we discover the true nature of our existence. And so, as I sit here on my porch, watching the world go by, I am content to simply marvel at the beauty and complexity of it all, and to embrace the mystery that lies at the heart of our being."]
+    prompts = ["An example of an animal that starts with the letter 'd' is a"]
+    prompt_len = min(prompt_len, len(tokenizer(prompts[0]).input_ids))
     input_ids = tokenizer(prompts, padding="max_length",
                           max_length=prompt_len, add_special_tokens=False).input_ids
     # Seems max_length is not working.
@@ -1349,7 +1361,7 @@ def run_flexgen(args):
     if DUMMY_WEIGHT not in args.path:
         outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
         show_str = "Outputs:\n" + 70 * '-' + "\n"
-        for i in [0, len(outputs)-1]:
+        for i in range(0, len(outputs)):
             show_str += f"{i}: {outputs[i]}\n"
             show_str += "-" * 70 + "\n"
         if args.verbose >= 2:

@@ -561,9 +561,8 @@ class TorchDevice:
         # k, v: (s, b * n_head, head_dim)
         # We need to transform them to:
         # (hh_k * 2, b * n_head, head_dim)
-        
-        k = torch.cat([k[:hh_k-1], k[-hh_k + 1:]], dim=0)
-        v = torch.cat([v[:hh_k-1], v[-hh_k + 1:]], dim=0)
+        k = torch.cat([k[:hh_k], k[-hh_k:]], dim=0)
+        v = torch.cat([v[:hh_k], v[-hh_k:]], dim=0)
         # k = torch.cat([v[:hh_k-1], v[-hh_k + 1:]], dim=0)
         return k, v, None
 
