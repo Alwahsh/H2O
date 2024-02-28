@@ -320,7 +320,7 @@ class TorchDevice:
         return k_cache, v_cache, acc
 
     def mha(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v,
-            w_out, b_out, w_ln, b_ln, n_head, donate, compress_cache, comp_config, hh_k=None, hh_all=None, attn_sink=False):
+            w_out, b_out, w_ln, b_ln, n_head, donate, compress_cache, comp_config, hh_k=None, hh_all=None, attn_sink=False, full_attn=False):
         """Multi-head attention (prefill phase)."""
         # decompress weights
         if w_q.device.device_type == DeviceType.COMPRESSED:
@@ -382,7 +382,9 @@ class TorchDevice:
         k = k.permute(2, 0, 1)
         v = v.permute(1, 0, 2)
 
-        if attn_sink:
+        if full_attn:
+            acc = None
+        elif attn_sink:
             k, v, acc = self._attn_sink_pruning(k, v, hh_k)
         # select the heavy hitters and recent tokens
         elif hh_k is not None:
@@ -402,7 +404,7 @@ class TorchDevice:
     def mha_gen(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v,
                 w_out, b_out, w_ln, b_ln, n_head, k_cache, v_cache, acc, donate,
                 attn_sparsity, compress_cache, comp_config,
-                hh_k=None, hh_all=False, attn_sink=False):
+                hh_k=None, hh_all=False, attn_sink=False, full_attn=False):
         """Multi-head attention (decoding phase)."""
         # decompress weights
         if w_q.device.device_type == DeviceType.COMPRESSED:
@@ -522,7 +524,7 @@ class TorchDevice:
 
         # get the least heavy hitter (except recent tokens)
         kick_ind = None
-        if attn_sink:
+        if full_attn or attn_sink:
             acc = None
         else:
             if hh_all:

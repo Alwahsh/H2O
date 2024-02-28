@@ -78,6 +78,9 @@ class Policy:
     # Attention Sink
     attn_sink: bool = False
 
+    # Full Attention
+    full_attn: bool = False
+
     @property
     def w_disk_percent(self):
         return 100 - self.w_gpu_percent - self.w_cpu_percent
@@ -467,6 +470,9 @@ class SelfAttention:
                 pos = min(self.hh_k * 2 - 1, self.task.prompt_len) + i
             indices = (slice(pos - k_new.shape[0], pos),
                        slice(0, k_new.shape[1]))
+            if self.policy.full_attn:
+                indices = (slice(k_home.shape[0], k_home.shape[0]+k_new.shape[0]),
+                           slice(0, k_new.shape[1]))
         general_copy(k_home, indices, k_new, None)
         general_copy(v_home, indices, v_new, None)
         # print(k_home.data.shape)
@@ -499,7 +505,7 @@ class SelfAttention:
             h, new_k_cache, new_v_cache, acc = self.compute.mha(h, mask, w_q, b_q,
                 w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head, donate,
                 self.policy.compress_cache, self.policy.comp_cache_config,
-                self.hh_k, self.policy.hh_all, self.policy.attn_sink)
+                self.hh_k, self.policy.hh_all, self.policy.attn_sink, self.policy.full_attn)
             # print(new_k_cache.shape)
             # print(new_k_cache.data[:, :2, :2])
             cache_write_buf.store((new_k_cache, new_v_cache, acc, None))
@@ -516,11 +522,12 @@ class SelfAttention:
                 cnt = min(self.hh_k * 2 - 1, self.task.prompt_len + i)
                 mask = mask.device.slice_attention_mask(mask, cnt + 1)
             # AHMED: This is the line where the attention along with the KV Cache changes happens.
+            pdb.set_trace()
             h, new_k_cache, new_v_cache, acc, kick_ind = self.compute.mha_gen(h, mask, w_q,
                 b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head,
                 k_cache, v_cache, acc, donate, self.policy.attn_sparsity,
                 self.policy.compress_cache, self.policy.comp_cache_config,
-                self.hh_k, self.policy.hh_all, self.policy.attn_sink)
+                self.hh_k, self.policy.hh_all, self.policy.attn_sink, self.policy.full_attn)
             # if self.layer_id == 10:
             #     print(h.data)
             cache_write_buf.store((new_k_cache, new_v_cache, acc, kick_ind))
@@ -1316,7 +1323,8 @@ def run_flexgen(args):
                     hh_ratio=args.hh_ratio,
                     hh_all=args.hh_all,
                     hh_long_seq=args.hh_long_seq,
-                    attn_sink=args.attn_sink)
+                    attn_sink=args.attn_sink,
+                    full_attn=args.full_attn)
     assert not (args.compress_cache and args.attn_sparsity < 1.0), "Not implemented"
 
     opt_config = get_opt_config(args.model)
@@ -1425,7 +1433,8 @@ def add_parser_arguments(parser):
                         help="ratio of the prompt seq length")
     parser.add_argument("--hh-all", type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument("--hh-long-seq", type=str2bool, nargs='?', const=True, default=False)
-    parser.add_argument("--attn_sink", type=str2bool, nargs='?', const=True, default=False)
+    parser.add_argument("--attn_sink", type=str2bool, nargs='?', const=True, default=False) #TODO: Change attn_sink to attn-sink.
+    parser.add_argument("--full-attn", type=str2bool, nargs='?', const=True, default=False)
 
     parser.add_argument("--log-file", type=str, default="auto")
     parser.add_argument("--no-log", action="store_true")
