@@ -295,6 +295,8 @@ class SelfAttention:
     def set_task(self, task):
         self.task = task
         self.hh_k = int(task.prompt_len * self.policy.hh_ratio)
+        if self.policy.full_attn:
+            self.hh_k = None
 
     def init_weight(self, weight_home, path):
         h, dtype = (self.config.input_dim, self.config.dtype)
@@ -374,7 +376,11 @@ class SelfAttention:
                 path = 0
             dst = self.attention_compute
         # The position is the minimum of the prompt length and the max saved cache length.
-        pos = min(self.hh_k * 2 - 1, self.task.prompt_len) + 1
+        if self.policy.full_attn:
+            pos = self.task.prompt_len
+        else:
+            pos = min(self.hh_k * 2 - 1, self.task.prompt_len) + 1
+        # TODO: Check that this is correctly set for attention_sink.
         if path == 0:  # Direct copy
             # shape: (s, b * n_head, head_dim)
             if self.policy.hh_all:
@@ -451,11 +457,6 @@ class SelfAttention:
 
         else:  # decoding
             if self.policy.hh_all:
-                # if self.layer_id == 10:
-                #     print("k initial: ", self.hash_tensor(k_home.data[:self.hh_k,:,:]))
-                #     print("v initial: ", self.hash_tensor(v_home.data[:self.hh_k,:,:]))
-                #     print("k final: ", self.hash_tensor(k_home.data[self.hh_k:,:,:]))
-                #     print("v final: ", self.hash_tensor(v_home.data[self.hh_k:,:,:]))
                 # This is the part where we replace the oldest token in the recent tokens.
                 oldest = ((i - 1) % (self.hh_k - 1)) - (self.hh_k - 1)
                 cache_replace(k_home, kick_ind, k_new, self.hh_k, oldest)
@@ -464,17 +465,25 @@ class SelfAttention:
                     acc_replace(acc, kick_ind, acc_new, self.hh_k, oldest)
                 return
 
-            if self.hh_k is None:
+            if self.hh_k is None or self.policy.full_attn:
                 pos = self.task.prompt_len + i
             else:
                 pos = min(self.hh_k * 2 - 1, self.task.prompt_len) + i
             indices = (slice(pos - k_new.shape[0], pos),
                        slice(0, k_new.shape[1]))
-            if self.policy.full_attn:
-                indices = (slice(k_home.shape[0], k_home.shape[0]+k_new.shape[0]),
-                           slice(0, k_new.shape[1]))
+                # if i >= 31 and self.layer_id == 10:
+                #     pdb.set_trace()
+        if i <= 35 and self.layer_id == 10:
+            print(f"k initial: - {i}: ", self.hash_tensor(k_home.data))
+            print(f"v initial: - {i} ", self.hash_tensor(v_home.data))
+            print(indices)
         general_copy(k_home, indices, k_new, None)
         general_copy(v_home, indices, v_new, None)
+        torch.cuda.synchronize()
+        if i <= 35 and self.layer_id == 10:
+            print(f"k new: - {i}: ", self.hash_tensor(k_home.data))
+            print(f"v new: - {i} ", self.hash_tensor(v_home.data))
+            print(indices)
         # print(k_home.data.shape)
         if self.policy.hh_all and acc is not None and acc_new is not None:
             general_copy(acc, indices, acc_new, None)
@@ -518,16 +527,21 @@ class SelfAttention:
             #     print(k_cache.shape)
             #     cnt = min(self.hh_k * 2, self.task.prompt_len)
             #     print(v_cache.data[:cnt + i][-5:, 0, :2])
-            if self.policy.hh_all is not None:
+            if self.policy.hh_all is not None and self.policy.hh_all:
                 cnt = min(self.hh_k * 2 - 1, self.task.prompt_len + i)
                 mask = mask.device.slice_attention_mask(mask, cnt + 1)
             # AHMED: This is the line where the attention along with the KV Cache changes happens.
-            pdb.set_trace()
             h, new_k_cache, new_v_cache, acc, kick_ind = self.compute.mha_gen(h, mask, w_q,
                 b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head,
                 k_cache, v_cache, acc, donate, self.policy.attn_sparsity,
                 self.policy.compress_cache, self.policy.comp_cache_config,
                 self.hh_k, self.policy.hh_all, self.policy.attn_sink, self.policy.full_attn)
+            # if i >= 2 and self.layer_id == 10:
+            #     # pdb.set_trace()
+            #     print(f"k initial: - {i}", self.hash_tensor(k_cache.data))
+            #     print(f"v initial: - {i}", self.hash_tensor(v_cache.data))
+            #     print(f"k new: - {i}", self.hash_tensor(new_k_cache.data))
+            #     print(f"v new: - {i}", self.hash_tensor(new_v_cache.data))
             # if self.layer_id == 10:
             #     print(h.data)
             cache_write_buf.store((new_k_cache, new_v_cache, acc, kick_ind))
@@ -1283,7 +1297,7 @@ def get_test_inputs(prompt_len, num_prompts, tokenizer):
     prompts = ["An example of an animal that starts with the letter 'd' is a"]
     prompt_len = min(prompt_len, len(tokenizer(prompts[0]).input_ids))
     input_ids = tokenizer(prompts, padding="max_length",
-                          max_length=prompt_len, add_special_tokens=False).input_ids
+                          max_length=prompt_len).input_ids
     # Seems max_length is not working.
     input_ids = [ids[:prompt_len] for ids in input_ids]
     # input_ids = tokenizer(prompts, add_special_tokens=False).input_ids
@@ -1304,6 +1318,7 @@ def run_flexgen(args):
     print(prompt_len)
 
     gpu = TorchDevice("cuda:0")
+    # gpu = TorchDevice("cpu")
     cpu = TorchDevice("cpu")
     disk = TorchDisk(args.offload_dir)
     env = ExecutionEnv(gpu=gpu, cpu=cpu, disk=disk, mixed=TorchMixedDevice([gpu, cpu, disk]))

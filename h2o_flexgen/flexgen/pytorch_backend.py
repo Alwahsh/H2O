@@ -308,7 +308,7 @@ class TorchDevice:
             policy.gpu_batch_size)
         if hh_all:
             shape = (hh_k * 2, gpu_batch_size * num_head, hidden_size // num_head)
-        elif hh_k * 2 < prompt_len:
+        elif hh_k is not None and hh_k * 2 < prompt_len:
             shape = (hh_k * 2 + gen_len - 1, gpu_batch_size * num_head, hidden_size // num_head)
         else:
             shape = (prompt_len + gen_len - 1, gpu_batch_size * num_head, hidden_size // num_head)
@@ -443,7 +443,6 @@ class TorchDevice:
         #     v_tmp = v.permute(0, 2, 1, 3).reshape(b * n_head, -1, head_dim)
         #     print("key_states", k_tmp.shape, k_tmp)
         #     print("value_states", v_tmp.shape, v_tmp)
-
         if isinstance(k_cache, TorchTensor):
             if attn_sparsity >= 1.0:  # Dense attention
                 if compress_cache:
